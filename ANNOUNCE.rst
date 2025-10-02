@@ -1,33 +1,23 @@
-Announcing Python-Blosc2 3.8.0
+Announcing Python-Blosc2 3.9.1
 ==============================
 
-This is a minor version release where we have aimed to make the first steps
-towards complying fully with the array-api standard:
+This is a patch release where we have aimed to tidy up the code and improve robustness:
 
-✅ C-Blosc2 internal library updated to latest 2.21.2.
-
-✅ numexpr version requirement pushed to 2.12.1 to incorporate
-``isnan``, ``isfinite``, ``isinf`` functions.
-
-✅ Indexing is now supported extensively and reasonably optimally for slices
-with negative steps, general boolean arrays and fancy indices, with both get/setitem having
-equal functionality. In PR #459 we extended the 1D fast path to general N-D,
-with consequent speedups. In PR #461 we allowed fancy indexing and general slicing
-with negative steps for set and getitem, with a memory-optimised path for setitem.
-
-✅ Various attributes and methods for the ``NDArray`` class, as well as functions, have
-been added to increase compliance with the array-api standard. In addition,
-linspace and arange functions have been made more numerically stable and now strictly
-comply even with difficult floating-point edge cases.
+✅ Bumped to numexpr 2.13.1 to incorporate new maximum/minimum NaN handling and "+"/"*" for booleans
+which matches NumPy behaviour.
+✅ Refactoring in order to ensure Blosc2 functions with NumPy 1.26.
+✅ Streamlined documentation by introducing Array Protocol
 
 You can think of Python-Blosc2 3.x as an extension of NumPy/numexpr that:
 
-- Can deal with ndarrays compressed using first-class codecs & filters.
+- Can deal with NDArray compressed objects using first-class codecs & filters.
 - Performs many kind of math expressions, including reductions, indexing...
+- Supports multi-threading and SIMD acceleration (via numexpr).
+- Can operate with data from other libraries (like PyTables, h5py, Zarr, Dask, etc).
 - Supports NumPy ufunc mechanism: mix and match NumPy and Blosc2 computations.
 - Integrates with Numba and Cython via UDFs (User Defined Functions).
 - Adheres to modern NumPy casting rules way better than numexpr.
-- Performs linear algebra operations (like ``blosc2.matmul()``).
+- Performs linear algebra operations (like ``blosc2.tensordot()``).
 
 Install it with::
 

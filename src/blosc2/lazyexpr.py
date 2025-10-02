@@ -40,7 +40,16 @@ import numpy as np
 import blosc2
 from blosc2 import compute_chunks_blocks
 from blosc2.info import InfoReporter
-from blosc2.ndarray import _check_allowed_dtypes, get_chunks_idx, is_inside_new_expr, process_key
+from blosc2.ndarray import (
+    _check_allowed_dtypes,
+    get_chunks_idx,
+    get_intersecting_chunks,
+    is_inside_new_expr,
+    local_ufunc_map,
+    process_key,
+    ufunc_map,
+    ufunc_map_1param,
+)
 
 if not blosc2.IS_WASM:
     import numexpr
@@ -144,6 +153,7 @@ functions = [
     "log",
     "log10",
     "log1p",
+    "log2",
     "conj",
     "real",
     "imag",
@@ -163,6 +173,16 @@ functions = [
     "isnan",
     "isfinite",
     "isinf",
+    "nextafter",
+    "copysign",
+    "hypot",
+    "maximum",
+    "minimum",
+    "floor",
+    "ceil",
+    "trunc",
+    "signbit",
+    "round",
 ]
 
 # Gather all callable functions in numpy
@@ -181,6 +201,7 @@ functions += constructors
 
 relational_ops = ["==", "!=", "<", "<=", ">", ">="]
 logical_ops = ["&", "|", "^", "~"]
+not_complex_ops = ["maximum", "minimum", "<", "<=", ">", ">="]
 
 
 def get_expr_globals(expression):
@@ -281,7 +302,7 @@ class LazyArray(ABC):
     @abstractmethod
     def compute(self, item: slice | list[slice] | None = None, **kwargs: Any) -> blosc2.NDArray:
         """
-        Return an :ref:`NDArray` containing the evaluation of the :ref:`LazyArray`.
+        Return a :ref:`NDArray` containing the evaluation of the :ref:`LazyArray`.
 
         Parameters
         ----------
@@ -330,9 +351,9 @@ class LazyArray(ABC):
         pass
 
     @abstractmethod
-    def __getitem__(self, item: int | slice | Sequence[slice]) -> blosc2.NDArray:
+    def __getitem__(self, item: int | slice | Sequence[slice]) -> np.ndarray:
         """
-        Return a NumPy.ndarray containing the evaluation of the :ref:`LazyArray`.
+        Return a numpy.ndarray containing the evaluation of the :ref:`LazyArray`.
 
         Parameters
         ----------
@@ -385,7 +406,7 @@ class LazyArray(ABC):
 
         Notes
         -----
-        * All the operands of the LazyArray must be Python scalars, :ref:`NDArray`, :ref:`C2Array` or :ref:`Proxy`.
+        * All the operands of the LazyArray must be Python scalars, or :ref:`blosc2.Array` objects.
         * If an operand is a :ref:`Proxy`, keep in mind that Python-Blosc2 will only be able to reopen it as such
           if its source is a :ref:`SChunk`, :ref:`NDArray` or a :ref:`C2Array` (see :func:`blosc2.open` notes
           section for more info).
@@ -492,7 +513,7 @@ class LazyArray(ABC):
     def __bool__(self) -> bool:
         if math.prod(self.shape) != 1:
             raise ValueError(f"The truth value of a LazyArray of shape {self.shape} is ambiguous.")
-        return bool(self[()])
+        return self[()].__bool__()
 
 
 def convert_inputs(inputs):
@@ -500,14 +521,12 @@ def convert_inputs(inputs):
         return []
     inputs_ = []
     for obj in inputs:
-        if not isinstance(
-            obj, np.ndarray | blosc2.NDArray | blosc2.NDField | blosc2.C2Array
-        ) and not np.isscalar(obj):
+        if not isinstance(obj, blosc2.Array) and not np.isscalar(obj):
             try:
                 obj = np.asarray(obj)
             except Exception:
                 print(
-                    "Inputs not being np.ndarray, NDArray, NDField, C2Array or Python scalar objects"
+                    "Inputs not being np.ndarray, Array or Python scalar objects"
                     " should be convertible to np.ndarray."
                 )
                 raise
@@ -680,9 +699,9 @@ def get_expr_operands(expression: str) -> set:
 
 def conserve_functions(  # noqa: C901
     expression: str,
-    operands_old: dict[str, blosc2.NDArray | blosc2.LazyExpr],
-    operands_new: dict[str, blosc2.NDArray | blosc2.LazyExpr],
-) -> tuple[str, dict[str, blosc2.NDArray]]:
+    operands_old: dict[str, blosc2.Array],
+    operands_new: dict[str, blosc2.Array],
+) -> tuple[str, dict[str, blosc2.Array]]:
     """
     Given an expression in string form, return its operands.
 
@@ -898,11 +917,15 @@ def validate_inputs(inputs: dict, out=None, reduce=False) -> tuple:  # noqa: C90
             fast_path = False
         if first_input.blocks != out.blocks:
             fast_path = False
+        if 0 in out.chunks:  # fast_eval has zero division error for 0 shapes
+            fast_path = False
     # Then, the rest of the operands
     for input_ in NDinputs:
         if first_input.chunks != input_.chunks:
             fast_path = False
         if first_input.blocks != input_.blocks:
+            fast_path = False
+        if 0 in input_.chunks:  # fast_eval has zero division error for 0 shapes
             fast_path = False
 
     return first_input.shape, first_input.chunks, first_input.blocks, fast_path
@@ -1371,7 +1394,7 @@ def slices_eval(  # noqa: C901
             # shape_slice in general not equal to final shape:
             # dummy dims (due to ints) will be dealt with by taking final_slice
             shape_slice = ndindex.ndindex(_slice).newshape(shape)
-            mask_slice = np.bool([isinstance(i, int) for i in orig_slice])
+            mask_slice = np.array([isinstance(i, int) for i in orig_slice], dtype=np.bool_)
     else:
         # # out should always have shape of full array
         # if shape is not None and shape != out.shape:
@@ -1571,7 +1594,7 @@ def slices_eval(  # noqa: C901
             elif isinstance(out, blosc2.NDArray):
                 # It *seems* better to choose an automatic chunks and blocks for the output array
                 # out = out.slice(_slice, chunks=out.chunks, blocks=out.blocks)
-                out = out.squeeze(mask_slice)
+                out = out.squeeze(np.where(mask_slice)[0])
             else:
                 raise ValueError("The output array is not a NumPy array or a NDArray")
 
@@ -1695,8 +1718,8 @@ def step_handler(cslice, _slice):
         s1start, s1stop = s1.start, s1.stop
         s2start, s2stop, s2step = s2.start, s2.stop, s2.step
         # assume s1step = 1
-        newstart = max(s1start, s2start)
-        newstop = min(s1stop, s2stop)
+        newstart = builtins.max(s1start, s2start)
+        newstop = builtins.min(s1stop, s2stop)
         rem = (newstart - s2start) % s2step
         if rem != 0:  # only pass through here if s2step is not 1
             newstart += s2step - rem
@@ -1758,7 +1781,7 @@ def reduce_slices(  # noqa: C901
 
     _slice = _slice.raw
     shape_slice = shape
-    mask_slice = np.bool([isinstance(i, int) for i in _slice])
+    mask_slice = np.array([isinstance(i, int) for i in _slice], dtype=np.bool_)
     if out is None and _slice != ():
         _slice = tuple(slice(i, i + 1, 1) if isinstance(i, int) else i for i in _slice)
         shape_slice = ndindex.ndindex(_slice).newshape(shape)
@@ -2018,7 +2041,7 @@ def chunked_eval(  # noqa: C901
         _getitem: bool, optional
             Indicates whether the expression is being evaluated for a getitem operation.
             Default is False.
-        _output: NDArray or np.ndarray, optional
+        _output: blosc2.Array, optional
             The output array to store the result.
         _ne_args: dict, optional
             Additional arguments to be passed to `numexpr.evaluate()` function.
@@ -2152,27 +2175,77 @@ def fuse_expressions(expr, new_base, dup_op):
 
 
 def infer_dtype(op, value1, value2):
+    if op == "contains":
+        return np.dtype(np.bool_)
+
+    v1_dtype = blosc2.result_type(value1)
+    v2_dtype = v1_dtype if value2 is None else blosc2.result_type(value2)
+    if op in not_complex_ops and (v1_dtype == np.complex128 or v2_dtype == np.complex128):
+        # Ensure that throw exception for functions which don't support complex args
+        raise ValueError(f"Invalid operand type for {op}: {v1_dtype, v2_dtype}")
     if op in relational_ops:
         return np.dtype(np.bool_)
     if op in logical_ops:
-        # Ensure that both operands are boolean
-        if value1.dtype != np.bool_:
-            raise ValueError(f"Invalid operand type for {op}: {value1.dtype}")
-        if op != "~" and value2.dtype != np.bool_:
-            raise ValueError(f"Invalid operand type for {op}: {value2.dtype}")
-        return np.dtype(np.bool_)
+        # Ensure that both operands are booleans or ints
+        if v1_dtype not in (np.bool_, np.int32, np.int64):
+            raise ValueError(f"Invalid operand type for {op}: {v1_dtype}")
+        if v2_dtype not in (np.bool_, np.int32, np.int64):
+            raise ValueError(f"Invalid operand type for {op}: {v2_dtype}")
+
+    if op == "/":
+        if v1_dtype == np.int32 and v2_dtype == np.int32:
+            return blosc2.float32
+        if np.issubdtype(v1_dtype, np.integer) and np.issubdtype(v2_dtype, np.integer):
+            return blosc2.float64
 
     # Follow NumPy rules for scalar-array operations
+    return blosc2.result_type(value1, value2)
+
+
+def result_type(
+    *arrays_and_dtypes: blosc2.NDArray | int | float | complex | bool | blosc2.dtype,
+) -> blosc2.dtype:
+    """
+    Returns the dtype that results from applying type promotion rules (see Type Promotion Rules) to the arguments.
+
+    Parameters
+    ----------
+    arrays_and_dtypes: Sequence[NDarray | int | float | complex | bool | blosc2.dtype])
+        An arbitrary number of input arrays, scalars, and/or dtypes.
+
+    Returns
+    -------
+    out: blosc2.dtype
+        The dtype resulting from an operation involving the input arrays, scalars, and/or dtypes.
+    """
+    # Follow NumPy rules for scalar-array operations
     # Create small arrays with the same dtypes and let NumPy's type promotion determine the result type
-    if np.isscalar(value1) and hasattr(value2, "shape"):
-        arr2 = np.array([0], dtype=value2.dtype)
-        return (value1 + arr2).dtype
-    elif np.isscalar(value2) and hasattr(value1, "shape"):
-        arr1 = np.array([0], dtype=value1.dtype)
-        return (arr1 + value2).dtype
-    else:
-        # Both are arrays or both are scalars, use NumPy's type promotion rules
-        return np.result_type(value1, value2)
+    arrs = [
+        value if (np.isscalar(value) or not hasattr(value, "dtype")) else np.array([0], dtype=value.dtype)
+        for value in arrays_and_dtypes
+    ]
+    return np.result_type(*arrs)
+
+
+def can_cast(from_: blosc2.dtype | blosc2.NDArray, to: blosc2.dtype) -> bool:
+    """
+    Determines if one data type can be cast to another data type according to (NumPy) type promotion rules.
+
+    Parameters
+    ----------
+    from_: dtype | NDArray
+        Input data type or array from which to cast.
+
+    to: dtype
+    Desired data type.
+
+    Returns
+    -------
+    out:bool
+        True if the cast can occur according to type promotion rules; otherwise, False.
+    """
+    arrs = np.array([0], dtype=from_.dtype) if hasattr(from_, "shape") else from_
+    return np.result_type(arrs)
 
 
 class LazyExpr(LazyArray):
@@ -2189,6 +2262,7 @@ class LazyExpr(LazyArray):
             self.operands = {}
             return
         value1, op, value2 = new_op
+        dtype_ = infer_dtype(op, value1, value2)  # perform some checks
         if value2 is None:
             if isinstance(value1, LazyExpr):
                 self.expression = f"{op}({value1.expression})"
@@ -2197,7 +2271,17 @@ class LazyExpr(LazyArray):
                 self.operands = {"o0": value1}
                 self.expression = "o0" if op is None else f"{op}(o0)"
             return
-        elif op in ("arctan2", "contains", "pow", "power"):
+        elif op in (
+            "arctan2",
+            "contains",
+            "pow",
+            "power",
+            "nextafter",
+            "copysign",
+            "hypot",
+            "maximum",
+            "minimum",
+        ):
             if np.isscalar(value1) and np.isscalar(value2):
                 self.expression = f"{op}(o0, o1)"
             elif np.isscalar(value2):
@@ -2211,7 +2295,7 @@ class LazyExpr(LazyArray):
                 self.expression = f"{op}(o0, o1)"
             return
 
-        self._dtype = infer_dtype(op, value1, value2)
+        self._dtype = dtype_
         if np.isscalar(value1) and np.isscalar(value2):
             self.expression = f"({value1} {op} {value2})"
         elif np.isscalar(value2):
@@ -2269,74 +2353,77 @@ class LazyExpr(LazyArray):
         return out.schunk.get_chunk(nchunk)
 
     def update_expr(self, new_op):  # noqa: C901
+        prev_flag = blosc2._disable_overloaded_equal
         # We use a lot of the original NDArray.__eq__ as 'is', so deactivate the overloaded one
         blosc2._disable_overloaded_equal = True
         # One of the two operands are LazyExpr instances
-        value1, op, value2 = new_op
-        # The new expression and operands
-        expression = None
-        new_operands = {}
-        # where() handling requires evaluating the expression prior to merge.
-        # This is different from reductions, where the expression is evaluated
-        # and returned a NumPy array (for usability convenience).
-        # We do things like this to enable the fusion of operations like
-        # `a.where(0, 1).sum()`.
-        # Another possibility would have been to always evaluate where() and produce
-        # an NDArray, but that would have been less efficient for the case above.
-        if hasattr(value1, "_where_args"):
-            value1 = value1.compute()
-        if hasattr(value2, "_where_args"):
-            value2 = value2.compute()
+        try:
+            value1, op, value2 = new_op
+            # The new expression and operands
+            expression = None
+            new_operands = {}
+            # where() handling requires evaluating the expression prior to merge.
+            # This is different from reductions, where the expression is evaluated
+            # and returned a NumPy array (for usability convenience).
+            # We do things like this to enable the fusion of operations like
+            # `a.where(0, 1).sum()`.
+            # Another possibility would have been to always evaluate where() and produce
+            # an NDArray, but that would have been less efficient for the case above.
+            if hasattr(value1, "_where_args"):
+                value1 = value1.compute()
+            if hasattr(value2, "_where_args"):
+                value2 = value2.compute()
 
-        if not isinstance(value1, LazyExpr) and not isinstance(value2, LazyExpr):
-            # We converted some of the operands to NDArray (where() handling above)
-            new_operands = {"o0": value1, "o1": value2}
-            expression = f"(o0 {op} o1)"
-            return self._new_expr(expression, new_operands, guess=False, out=None, where=None)
-        elif isinstance(value1, LazyExpr) and isinstance(value2, LazyExpr):
-            # Expression fusion
-            # Fuse operands in expressions and detect duplicates
-            new_operands, dup_op = fuse_operands(value1.operands, value2.operands)
-            # Take expression 2 and rebase the operands while removing duplicates
-            new_expr = fuse_expressions(value2.expression, len(value1.operands), dup_op)
-            expression = f"({self.expression} {op} {new_expr})"
-        elif isinstance(value1, LazyExpr):
-            if op == "~":
-                expression = f"({op}{self.expression})"
-            elif np.isscalar(value2):
-                expression = f"({self.expression} {op} {value2})"
-            elif hasattr(value2, "shape") and value2.shape == ():
-                expression = f"({self.expression} {op} {value2[()]})"
-            else:
-                operand_to_key = {id(v): k for k, v in value1.operands.items()}
-                try:
-                    op_name = operand_to_key[id(value2)]
-                except KeyError:
-                    op_name = f"o{len(self.operands)}"
-                    new_operands = {op_name: value2}
-                expression = f"({self.expression} {op} {op_name})"
-            self.operands = value1.operands
-        else:
-            if np.isscalar(value1):
-                expression = f"({value1} {op} {self.expression})"
-            elif hasattr(value1, "shape") and value1.shape == ():
-                expression = f"({value1[()]} {op} {self.expression})"
-            else:
-                operand_to_key = {id(v): k for k, v in value2.operands.items()}
-                try:
-                    op_name = operand_to_key[id(value1)]
-                except KeyError:
-                    op_name = f"o{len(value2.operands)}"
-                    new_operands = {op_name: value1}
-                if op == "[]":  # syntactic sugar for slicing
-                    expression = f"({op_name}[{self.expression}])"
+            if not isinstance(value1, LazyExpr) and not isinstance(value2, LazyExpr):
+                # We converted some of the operands to NDArray (where() handling above)
+                new_operands = {"o0": value1, "o1": value2}
+                expression = f"(o0 {op} o1)"
+                return self._new_expr(expression, new_operands, guess=False, out=None, where=None)
+            elif isinstance(value1, LazyExpr) and isinstance(value2, LazyExpr):
+                # Expression fusion
+                # Fuse operands in expressions and detect duplicates
+                new_operands, dup_op = fuse_operands(value1.operands, value2.operands)
+                # Take expression 2 and rebase the operands while removing duplicates
+                new_expr = fuse_expressions(value2.expression, len(value1.operands), dup_op)
+                expression = f"({self.expression} {op} {new_expr})"
+            elif isinstance(value1, LazyExpr):
+                if op == "~":
+                    expression = f"({op}{self.expression})"
+                elif np.isscalar(value2):
+                    expression = f"({self.expression} {op} {value2})"
+                elif hasattr(value2, "shape") and value2.shape == ():
+                    expression = f"({self.expression} {op} {value2[()]})"
                 else:
-                    expression = f"({op_name} {op} {self.expression})"
-                self.operands = value2.operands
-        blosc2._disable_overloaded_equal = False
-        # Return a new expression
-        operands = self.operands | new_operands
-        return self._new_expr(expression, operands, guess=False, out=None, where=None)
+                    operand_to_key = {id(v): k for k, v in value1.operands.items()}
+                    try:
+                        op_name = operand_to_key[id(value2)]
+                    except KeyError:
+                        op_name = f"o{len(self.operands)}"
+                        new_operands = {op_name: value2}
+                    expression = f"({self.expression} {op} {op_name})"
+                self.operands = value1.operands
+            else:
+                if np.isscalar(value1):
+                    expression = f"({value1} {op} {self.expression})"
+                elif hasattr(value1, "shape") and value1.shape == ():
+                    expression = f"({value1[()]} {op} {self.expression})"
+                else:
+                    operand_to_key = {id(v): k for k, v in value2.operands.items()}
+                    try:
+                        op_name = operand_to_key[id(value1)]
+                    except KeyError:
+                        op_name = f"o{len(value2.operands)}"
+                        new_operands = {op_name: value1}
+                    if op == "[]":  # syntactic sugar for slicing
+                        expression = f"({op_name}[{self.expression}])"
+                    else:
+                        expression = f"({op_name} {op} {self.expression})"
+                    self.operands = value2.operands
+            # Return a new expression
+            operands = self.operands | new_operands
+            return self._new_expr(expression, operands, guess=False, out=None, where=None)
+        finally:
+            blosc2._disable_overloaded_equal = prev_flag
 
     @property
     def dtype(self):
@@ -2439,52 +2526,8 @@ class LazyExpr(LazyArray):
         if method != "__call__":
             return NotImplemented
 
-        ufunc_map = {
-            np.add: "+",
-            np.subtract: "-",
-            np.multiply: "*",
-            np.divide: "/",
-            np.true_divide: "/",
-            np.power: "**",
-            np.less: "<",
-            np.less_equal: "<=",
-            np.greater: ">",
-            np.greater_equal: ">=",
-            np.equal: "==",
-            np.not_equal: "!=",
-            np.bitwise_and: "&",
-            np.bitwise_or: "|",
-            np.bitwise_xor: "^",
-        }
-
-        ufunc_map_1param = {
-            np.sqrt: "sqrt",
-            np.sin: "sin",
-            np.cos: "cos",
-            np.tan: "tan",
-            np.arcsin: "arcsin",
-            np.arccos: "arccos",
-            np.arctan: "arctan",
-            np.sinh: "sinh",
-            np.cosh: "cosh",
-            np.tanh: "tanh",
-            np.arcsinh: "arcsinh",
-            np.arccosh: "arccosh",
-            np.arctanh: "arctanh",
-            np.exp: "exp",
-            np.expm1: "expm1",
-            np.log: "log",
-            np.log10: "log10",
-            np.log1p: "log1p",
-            np.abs: "abs",
-            np.conj: "conj",
-            np.real: "real",
-            np.imag: "imag",
-            np.bitwise_not: "~",
-            np.isnan: "isnan",
-            np.isfinite: "isfinite",
-            np.isinf: "isinf",
-        }
+        if ufunc in local_ufunc_map:
+            return local_ufunc_map[ufunc](*inputs)
 
         if ufunc in ufunc_map:
             value = inputs[0] if inputs[1] is self else inputs[1]
@@ -3064,6 +3107,10 @@ class LazyExpr(LazyArray):
             _operands = operands | local_vars
             _globals = get_expr_globals(expression)
             _globals |= dtype_symbols
+            # Check that operands are proper Operands, LazyArray or scalars; if not, convert to NDArray objects
+            for op, val in _operands.items():
+                if not (isinstance(val, (blosc2.Operand, blosc2.LazyArray, np.ndarray)) or np.isscalar(val)):
+                    _operands[op] = blosc2.SimpleProxy(val)
             new_expr = eval(_expression, _globals, _operands)
             _dtype = new_expr.dtype
             _shape = new_expr.shape
@@ -3177,7 +3224,7 @@ class LazyUDF(LazyArray):
     def info_items(self):
         inputs = {}
         for key, value in self.inputs_dict.items():
-            if isinstance(value, np.ndarray | blosc2.NDArray | blosc2.C2Array):
+            if isinstance(value, blosc2.Array):
                 inputs[key] = f"<{value.__class__.__name__}> {value.shape} {value.dtype}"
             else:
                 inputs[key] = str(value)
@@ -3303,7 +3350,7 @@ class LazyUDF(LazyArray):
 
 def lazyudf(
     func: Callable[[tuple, np.ndarray, tuple[int]], None],
-    inputs: tuple | list | None,
+    inputs: Sequence[Any] | None,
     dtype: np.dtype,
     shape: tuple | list | None = None,
     chunked_eval: bool = True,
@@ -3321,11 +3368,11 @@ def lazyudf(
         in :paramref:`inputs`.
         - `output`: The buffer to be filled as a multidimensional numpy.ndarray.
         - `offset`: The multidimensional offset corresponding to the start of the block being computed.
-    inputs: tuple or list or None
-        The sequence of inputs. Supported inputs are:
-        NumPy.ndarray, :ref:`NDArray`, :ref:`NDField`, :ref:`C2Array`.
-        Any other object is supported too, and will be passed as is to the user-defined function.
-        If not needed, this can be empty, but `shape` must be provided.
+    inputs: Sequence[Any] or None
+        The sequence of inputs. Besides objects compliant with the blosc2.Array protocol,
+        any other object is supported too, and it will be passed as-is to the
+        user-defined function. If not needed, this can be empty, but `shape` must
+        be provided.
     dtype: np.dtype
         The resulting ndarray dtype in NumPy format.
     shape: tuple, optional
@@ -3407,9 +3454,9 @@ def seek_operands(names, local_dict=None, global_dict=None, _frame_depth: int = 
 
 
 def lazyexpr(
-    expression: str | bytes | LazyExpr | blosc2.NDArray,
+    expression: str | bytes | LazyArray | blosc2.NDArray,
     operands: dict | None = None,
-    out: blosc2.NDArray | np.ndarray = None,
+    out: blosc2.Array = None,
     where: tuple | list | None = None,
     local_dict: dict | None = None,
     global_dict: dict | None = None,
@@ -3421,15 +3468,15 @@ def lazyexpr(
 
     Parameters
     ----------
-    expression: str or bytes or LazyExpr
-        The expression to evaluate. This can be any valid expression that can be
-        ingested by numexpr. If a LazyExpr is passed, the expression will be
+    expression: str or bytes or LazyExpr or NDArray
+        The expression to evaluate. This can be any valid expression that numexpr
+        can ingest. If a LazyExpr is passed, the expression will be
         updated with the new operands.
-    operands: dict
-        The dictionary with operands. Supported values are NumPy.ndarray,
-        Python scalars, :ref:`NDArray`, :ref:`NDField` or :ref:`C2Array` instances.
+    operands: dict[blosc2.Array], optional
+        The dictionary with operands. Supported values are Python scalars,
+        or any instance that is blosc2.Array compliant.
         If None, the operands will be seeked in the local and global dictionaries.
-    out: NDArray or np.ndarray, optional
+    out: blosc2.Array, optional
         The output array where the result will be stored. If not provided,
         a new NumPy array will be created and returned.
     where: tuple, list, optional
@@ -3558,9 +3605,9 @@ def evaluate(
     ex: str,
     local_dict: dict | None = None,
     global_dict: dict | None = None,
-    out: np.ndarray | blosc2.NDArray = None,
+    out: blosc2.Array = None,
     **kwargs: Any,
-) -> np.ndarray | blosc2.NDArray:
+) -> blosc2.Array:
     """
     Evaluate a string expression using the Blosc2 compute engine.
 
@@ -3584,7 +3631,7 @@ def evaluate(
     global_dict: dict, optional
         The global dictionary to use when looking for operands in the expression.
         If not provided, the global dictionary of the caller will be used.
-    out: NDArray or np.ndarray, optional
+    out: blosc2.Array, optional
         The output array where the result will be stored. If not provided,
         a new NumPy array will be created and returned.
     kwargs: Any, optional
@@ -3592,7 +3639,7 @@ def evaluate(
 
     Returns
     -------
-    out: NumPy or NDArray
+    out: blosc2.Array
         The result of the expression evaluation.  If out is provided, the result
         will be stored in out and returned at the same time.
 
@@ -3620,16 +3667,6 @@ def evaluate(
         return lexpr.compute()
     # The user did not specify an output array, so return a NumPy array
     return lexpr[()]
-
-
-def get_intersecting_chunks(_slice, shape, chunks):
-    if 0 not in chunks:
-        chunk_size = ndindex.ChunkSize(chunks)
-        return chunk_size.as_subchunks(_slice, shape)  # if _slice is (), returns all chunks
-    else:
-        return (
-            ndindex.ndindex(...).expand(shape),
-        )  # chunk is whole array so just return full tuple to do loop once
 
 
 if __name__ == "__main__":

@@ -172,6 +172,74 @@ The C-Blosc2 version's string."""
 iinfo = np.iinfo
 finfo = np.finfo
 
+
+def isdtype(a_dtype: np.dtype, kind: str | np.dtype | tuple):
+    """
+    Returns a boolean indicating whether a provided dtype is of a specified data type "kind".
+
+    Parameters
+    ----------
+    dtype: dtype
+        The input dtype.
+
+    kind: str | dtype | Tuple[str, dtype]
+        Data type kind.
+
+        If kind is a dtype, return boolean indicating whether the input dtype is equal to the dtype specified by kind.
+
+        If kind is a string, return boolean indicating whether the input dtype is of a specified data type kind.
+        The following dtype kinds are supporte:
+
+            * 'bool': boolean data types (e.g., bool).
+
+            * 'signed integer': signed integer data types (e.g., int8, int16, int32, int64).
+
+            * 'unsigned integer': unsigned integer data types (e.g., uint8, uint16, uint32, uint64).
+
+            * 'integral': integer data types. Shorthand for ('signed integer', 'unsigned integer').
+
+            * 'real floating': real-valued floating-point data types (e.g., float32, float64).
+
+            * 'complex floating': complex floating-point data types (e.g., complex64, complex128).
+
+            * 'numeric': numeric data types. Shorthand for ('integral', 'real floating', 'complex floating').
+
+    Returns
+    -------
+    out: bool
+        Boolean indicating whether a provided dtype is of a specified data type kind.
+    """
+    kind = (kind,) if not isinstance(kind, tuple) else kind
+    for _ in kind:
+        if a_dtype == kind:
+            return True
+
+    _complex, _signedint, _uint, _rfloat = False, False, False, False
+    if a_dtype in (complex64, complex128):
+        _complex = True
+        if "complex floating" in kind:
+            return True
+    if a_dtype == bool_ and "bool" in kind:
+        return True
+    if a_dtype in (int8, int16, int32, int64):
+        _signedint = True
+        if "signed integer" in kind:
+            return True
+    if a_dtype in (uint8, uint16, uint32, uint64):
+        _uint = True
+        if "unsigned integer" in kind:
+            return True
+    if a_dtype in (float16, float32, float64):
+        _rfloat = True
+        if "real floating" in kind:
+            return True
+    if "integral" in kind and (_signedint or _uint):
+        return True
+    return "numeric" in kind and (
+        _signedint or _uint or _rfloat or _complex
+    )  # checked everything, otherwise False
+
+
 # dtypes for array-api
 str_ = np.str_
 bytes_ = np.bytes_
@@ -199,6 +267,8 @@ from numpy import (
     uint32,
     uint64,
 )
+
+bool = bool
 
 DEFAULT_COMPLEX = complex128
 """
@@ -322,6 +392,7 @@ from .storage import (  # noqa: I001
 )
 
 from .ndarray import (
+    Array,
     NDArray,
     NDField,
     Operand,
@@ -355,10 +426,6 @@ from .ndarray import (
     full,
     full_like,
     save,
-    matmul,
-    permute_dims,
-    transpose,
-    matrix_transpose,
     stack,
 )
 from .embed_store import EmbedStore, estore_from_cframe
@@ -376,11 +443,15 @@ from .lazyexpr import (
     get_expr_operands,
     validate_expr,
     evaluate,
-    slices_eval,
+    result_type,
+    can_cast,
 )
 from .proxy import Proxy, ProxySource, ProxyNDSource, ProxyNDField, SimpleProxy, jit
 
 from .schunk import SChunk, open
+from . import linalg
+from .linalg import tensordot, vecdot, permute_dims, matrix_transpose, matmul, transpose, diagonal, outer
+from . import fft
 
 # Registry for postfilters
 postfilter_funcs = {}
@@ -418,6 +489,9 @@ Disable the overloaded equal operator.
 # Delayed imports for avoiding overwriting of python builtins
 from .ndarray import (
     abs,
+    acos,
+    acosh,
+    add,
     all,
     any,
     arccos,
@@ -428,33 +502,81 @@ from .ndarray import (
     arctan2,
     arctanh,
     array_from_ffi_ptr,
+    asin,
+    asinh,
+    atan,
+    atan2,
+    atanh,
+    bitwise_and,
+    bitwise_invert,
+    bitwise_left_shift,
+    bitwise_or,
+    bitwise_right_shift,
+    bitwise_xor,
+    ceil,
+    clip,
     conj,
     contains,
+    copysign,
     cos,
     cosh,
+    count_nonzero,
+    divide,
     equal,
     exp,
     expm1,
+    floor,
+    floor_divide,
+    greater,
+    greater_equal,
+    hypot,
     imag,
     isfinite,
     isinf,
     isnan,
     lazywhere,
+    less,
+    less_equal,
     log,
     log1p,
+    log2,
     log10,
+    logaddexp,
+    logical_and,
+    logical_not,
+    logical_or,
+    logical_xor,
     max,
+    maximum,
     mean,
     min,
+    minimum,
+    multiply,
+    negative,
+    nextafter,
+    not_equal,
+    positive,
+    pow,
     prod,
     real,
+    reciprocal,
+    remainder,
+    round,
+    sign,
+    signbit,
     sin,
     sinh,
     sqrt,
+    square,
+    squeeze,
     std,
+    subtract,
     sum,
+    take,
+    take_along_axis,
     tan,
     tanh,
+    trunc,
     var,
     where,
 )
@@ -508,6 +630,9 @@ __all__ = [  # noqa : RUF022
     "__version__",
     # Functions
     "abs",
+    "acos",
+    "acosh",
+    "add",
     "all",
     "any",
     "arange",
@@ -521,9 +646,23 @@ __all__ = [  # noqa : RUF022
     "are_partitions_aligned",
     "are_partitions_behaved",
     "asarray",
+    "asin",
+    "asinh",
     "astype",
-    "clib_info",
+    "atan",
+    "atan2",
+    "atanh",
+    "bitwise_and",
+    "bitwise_invert",
+    "bitwise_left_shift",
+    "bitwise_or",
+    "bitwise_right_shift",
+    "bitwise_xor",
     "broadcast_to",
+    "can_cast",
+    "ceil",
+    "clib_info",
+    "clip",
     "compress",
     "compress2",
     "compressor_list",
@@ -531,11 +670,14 @@ __all__ = [  # noqa : RUF022
     "concat",
     "concatenate",
     "copy",
+    "copysign",
+    "count_nonzero",
     "cparams_dflts",
     "cpu_info",
     "decompress",
     "decompress2",
     "detect_number_of_cores",
+    "divide",
     "dparams_dflts",
     "empty",
     "empty_like",
@@ -544,6 +686,9 @@ __all__ = [  # noqa : RUF022
     "expand_dims",
     "expm1",
     "eye",
+    "finfo",
+    "floor",
+    "floor_divide",
     "free_resources",
     "from_cframe",
     "frombuffer",
@@ -557,7 +702,12 @@ __all__ = [  # noqa : RUF022
     "get_cpu_info",
     "get_expr_operands",
     "get_slice_nchunks",
+    "greater",
+    "greater_equal",
+    "hypot",
+    "iinfo",
     "indices",
+    "isdtype",
     "isfinite",
     "isinf",
     "isnan",
@@ -565,20 +715,34 @@ __all__ = [  # noqa : RUF022
     "lazyexpr",
     "lazyudf",
     "lazywhere",
+    "less_equal",
+    "less_than",
     "linspace",
     "load_array",
     "load_tensor",
     "log",
     "log1p",
+    "log2",
     "log10",
+    "logaddexp",
+    "logical_and",
+    "logical_not",
+    "logical_or",
+    "logical_xor",
     "matmul",
     "matrix_transpose",
     "max",
+    "maximum",
     "mean",
     "meshgrid",
     "min",
+    "minimum",
+    "multiply",
     "nans",
     "ndarray_from_cframe",
+    "negative",
+    "nextafter",
+    "not_equal",
     "ones",
     "ones_like",
     "open",
@@ -587,15 +751,21 @@ __all__ = [  # noqa : RUF022
     "pack_array2",
     "pack_tensor",
     "permute_dims",
+    "positive",
     "postfilter_funcs",
+    "pow",
     "prefilter_funcs",
     "print_versions",
     "prod",
     "real",
+    "reciprocal",
     "register_codec",
     "register_filter",
+    "remainder",
     "remove_urlpath",
     "reshape",
+    "result_type",
+    "round",
     "save",
     "save_array",
     "save_tensor",
@@ -604,13 +774,22 @@ __all__ = [  # noqa : RUF022
     "set_compressor",
     "set_nthreads",
     "set_releasegil",
+    "sign",
+    "signbit",
     "sort",
+    "square",
+    "squeeze",
     "stack",
     "storage_dflts",
     "sum",
+    "subtract",
+    "take",
+    "take_along_axis",
     "tan",
     "tanh",
+    "tensordot",
     "transpose",
+    "trunc",
     "uninit",
     "unpack",
     "unpack_array",
@@ -618,6 +797,7 @@ __all__ = [  # noqa : RUF022
     "unpack_tensor",
     "validate_expr",
     "var",
+    "vecdot",
     "where",
     "zeros",
     "zeros_like",

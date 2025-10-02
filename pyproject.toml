@@ -2,7 +2,7 @@
 requires = [
     "scikit-build-core",
     "cython>=3",
-    "numpy>=2.0.0",
+    "numpy>=2.1",
 ]
 build-backend = "scikit_build_core.build"
 
@@ -33,15 +33,14 @@ requires-python = ">=3.10"
 # Follow guidelines from https://scientific-python.org/specs/spec-0000/
 dependencies = [
     "numpy>=1.26",
-    #"numpy>=2",
     "ndindex",
     "msgpack",
     "platformdirs",
-    "numexpr>=2.12.1; platform_machine != 'wasm32'",
+    "numexpr>=2.13.1; platform_machine != 'wasm32'",
     "py-cpuinfo; platform_machine != 'wasm32'",
     "requests",
 ]
-version = "3.8.1.dev0"
+version = "3.9.2.dev0"
 [project.entry-points."array_api"]
 blosc2 = "blosc2"
 
