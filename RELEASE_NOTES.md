@@ -1,8 +1,37 @@
 # Release notes
 
-## Changes from 3.9.1 to 3.9.2
+## Changes from 3.11.0 to 3.11.1
 
 XXX version-specific blurb XXX
+
+## Changes from 3.10.2 to 3.11.0
+
+* Small optimisation for chunking in lazy expressions
+* Extend Blosc2 computation machinery to accept general array inputs (PR #510)
+* Refactoring and streamlining of get/setitem for non-unit steps (PR #513)
+* Remote array testing now performed with `cat2cloud` (PR #511)
+* Added argmax/argmin functions (PR #514)
+* Change `squeeze` to return view (rather than modify array in-place) (PR #518)
+* Modify `setitem` to load general array inputs into NDArrays (PR #517)
+
+## Changes from 3.10.1 to 3.10.2
+
+* LazyExpr.compute() now honors the `out` parameter for regular expressions (and not only for reductions).  See PR #506.
+
+## Changes from 3.10.0 to 3.10.1
+
+* Bumped to numexpr 2.14.1 to improve overflow behaviour for complex arguments for ``tanh`` and ``tanh``
+* Bug fixes for lazy expression calculation
+* Optimised computation for non-blosc2 chunked array arguments (e.g. Zarr, HDF5)
+* Various cleanups and most importantly shipping of python 3.14 wheels due to @DimitriPapadopoulos!
+* Now able to use blosc2 in AWS Lambda
+
+## Changes from 3.9.1 to 3.10.0
+
+* Improved documentation on thread management (thanks to [@orena1](@orena1) in PR #495)
+* Enabled direct ingestion of Zarr arrays, and added examples for xarray ingestion
+* Extended string-based lazy expression computation using a shape parser and modified lazy expression machinery so that expressions like "matmul(a, b) + c" can now be handled (PR #496).
+* Streamlined inheritance from ``Operand`` to ensure access to basic methods like ``__add__`` for all computable objects (``NDArray``, ``LazyExpr``, ``LazyArray`` etc.) (PR ##500).
 
 ## Changes from 3.9.0 to 3.9.1
 

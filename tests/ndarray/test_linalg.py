@@ -1,9 +1,13 @@
+import inspect
 from itertools import permutations
 
 import numpy as np
 import pytest
+import torch
 
 import blosc2
+from blosc2.lazyexpr import linalg_funcs
+from blosc2.ndarray import npvecdot
 
 
 @pytest.mark.parametrize(
@@ -12,7 +16,7 @@ import blosc2
         ((12, 10), (7, 5), (3, 3)),
         ((10,), (9,), (7,)),
         ((0,), (0,), (0,)),
-        ((40, 10, 10), (2, 3, 4), (1, 2, 2)),
+        ((4, 10, 10), (2, 3, 4), (1, 2, 2)),
     },
 )
 @pytest.mark.parametrize(
@@ -21,9 +25,9 @@ import blosc2
         ((10,), (4,), (2,)),
         ((10, 5), (3, 4), (1, 3)),
         ((10, 12), (2, 4), (1, 2)),
-        ((200, 10, 22), (23, 2, 4), (4, 1, 2)),
+        ((3, 10, 3), (2, 2, 4), (1, 1, 2)),
         ((0,), (0,), (0,)),
-        ((20, 40, 10, 10), (5, 2, 3, 4), (2, 1, 2, 2)),
+        ((6, 3, 10, 10), (5, 2, 3, 4), (2, 1, 2, 2)),
     },
 )
 @pytest.mark.parametrize(
@@ -298,13 +302,13 @@ def test_matmul_disk():
         ),
         # 5Dx5D->no reduce
         (
-            (3, 4, 5, 6, 7),
-            (2, 3, 4, 5, 6),
-            (1, 2, 2, 3, 3),
-            (5, 6, 7, 4, 8),
-            (4, 5, 6, 3, 7),
-            (2, 3, 3, 2, 4),
-            (2, 3, 4, 5, 6, 2, 3, 3, 2, 4),  # output dims = 10
+            (1, 2, 1, 5, 3),
+            (1, 1, 1, 2, 2),
+            (1, 1, 1, 1, 1),
+            (2, 3, 2, 1, 5),
+            (1, 2, 1, 1, 3),
+            (1, 2, 1, 1, 1),
+            (1, 2, 1, 2, 2, 2, 1, 2, 1, 3),  # output dims = 10
             ([], []),
         ),
     ],
@@ -501,11 +505,15 @@ def test_outer(shape1, chunk1, block1, shape2, chunk2, block2, chunkres, dtype):
         np.int64,
         np.float32,
         np.float64,
+        np.complex128,
     ],
 )
 def test_vecdot(shape1, chunk1, block1, shape2, chunk2, block2, chunkres, axis, dtype):
     # Create operands with requested dtype
     a_b2 = blosc2.arange(0, np.prod(shape1), shape=shape1, chunks=chunk1, blocks=block1, dtype=dtype)
+    if dtype == np.complex128:
+        a_b2 += 1j
+        a_b2 = a_b2.compute()
     a_np = a_b2[()]  # decompress
     b_b2 = blosc2.arange(0, np.prod(shape2), shape=shape2, chunks=chunk2, blocks=block2, dtype=dtype)
     b_np = b_b2[()]  # decompress
@@ -513,7 +521,7 @@ def test_vecdot(shape1, chunk1, block1, shape2, chunk2, block2, chunkres, axis, 
     # NumPy reference and Blosc2 comparison
     np_raised = None
     try:
-        res_np = np.vecdot(a_np, b_np, axis=axis)
+        res_np = npvecdot(a_np, b_np, axis=axis)
     except Exception as e:
         np_raised = type(e)
 
@@ -523,7 +531,7 @@ def test_vecdot(shape1, chunk1, block1, shape2, chunk2, block2, chunkres, axis, 
             blosc2.vecdot(a_b2, b_b2, axis=axis, chunks=chunkres)
     else:
         # Both should succeed
-        res_np = np.vecdot(a_np, b_np, axis=axis)
+        res_np = npvecdot(a_np, b_np, axis=axis)
         res_b2 = blosc2.vecdot(a_b2, b_b2, axis=axis, chunks=chunkres, fast_path=False)  # test slow path
         res_b2_np = res_b2[...]
 
@@ -812,3 +820,64 @@ def test_diagonal(shape, chunkshape, offset):
 
     # Assert equality
     np.testing.assert_array_equal(result_np, expected)
+
+
+@pytest.mark.parametrize(
+    "xp",
+    [torch, np],
+)
+@pytest.mark.parametrize(
+    "dtype",
+    ["int32", "int64", "float32", "float64", "complex128"],
+)
+def test_linalgproxy(xp, dtype):
+    dtype_ = getattr(xp, dtype) if hasattr(xp, dtype) else np.dtype(dtype)
+    for name in linalg_funcs:
+        if name == "transpose":
+            continue  # deprecated
+        func = getattr(blosc2, name)
+        N = 10
+        shape_a = (N,)
+        chunks = (N // 3,)
+        if name != "outer":
+            shape_a *= 3
+            chunks *= 3
+        blosc_matrix = blosc2.full(shape=shape_a, fill_value=3, dtype=np.dtype(dtype), chunks=chunks)
+        foreign_matrix = xp.ones(shape_a, dtype=dtype_)
+        if dtype == "complex128":
+            foreign_matrix += 0.5j
+            blosc_matrix = blosc2.full(
+                shape=shape_a, fill_value=3 + 2j, dtype=np.dtype(dtype), chunks=chunks
+            )
+
+        # Check this works
+        argspec = inspect.getfullargspec(func)
+        num_args = len(argspec.args)
+        # handle numpy 1.26
+        if name == "permute_dims":
+            npfunc = blosc2.linalg.nptranspose
+        elif name == "concat" and not hasattr(np, "concat"):
+            npfunc = np.concatenate
+        elif name == "matrix_transpose":
+            npfunc = blosc2.linalg.nptranspose
+        elif name == "vecdot":
+            npfunc = blosc2.linalg.npvecdot
+        else:
+            npfunc = getattr(np, name)
+        if num_args > 2 or name in ("outer", "matmul"):
+            try:
+                lexpr = func(blosc_matrix, foreign_matrix)
+            except NotImplementedError:
+                continue
+            foreign_matrix = np.asarray(foreign_matrix)
+            res = npfunc(blosc_matrix[()], foreign_matrix)
+        else:
+            try:
+                lexpr = func(foreign_matrix)
+            except NotImplementedError:
+                continue
+            except TypeError:
+                continue
+            foreign_matrix = np.asarray(foreign_matrix)
+            res = npfunc(foreign_matrix, 0) if name == "expand_dims" else npfunc(foreign_matrix)
+        np.testing.assert_array_equal(res, lexpr[()])

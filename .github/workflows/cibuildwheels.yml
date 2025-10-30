@@ -36,13 +36,13 @@ jobs:
           # Linux x86_64 builds
           - os: ubuntu-latest
             arch: x86_64
-            cibw_pattern: "cp3{10,11,12,13}-manylinux*"
+            cibw_pattern: "cp3{10,11,12,13,14}-manylinux*"
             artifact_name: "linux-x86_64"
 
           # Linux ARM64 builds (native runners)
           - os: ubuntu-24.04-arm
             arch: aarch64
-            cibw_pattern: "cp3{10,11,12,13}-manylinux*"
+            cibw_pattern: "cp3{10,11,12,13,14}-manylinux*"
             artifact_name: "linux-aarch64"
             # Don't use native runners for now (looks like wait times are too long)
             #runs-on: ["ubuntu-latest", "arm64"]
@@ -50,13 +50,13 @@ jobs:
           # Windows builds
           - os: windows-latest
             arch: x86_64
-            cibw_pattern: "cp3{10,11,12,13}-win64"
+            cibw_pattern: "cp3{10,11,12,13,14}-win64"
             artifact_name: "windows-x86_64"
 
           # macOS builds (universal2)
           - os: macos-latest
             arch: x86_64
-            cibw_pattern: "cp3{10,11,12,13}-macosx*"
+            cibw_pattern: "cp3{10,11,12,13,14}-macosx*"
             artifact_name: "macos-universal2"
     steps:
       - name: Checkout repo
@@ -110,7 +110,7 @@ jobs:
           source sdist_test_env/bin/activate
           python -m pytest tests/test_open.py tests/test_vlmeta.py tests/ndarray/test_evaluate.py
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact_name }}
           path: |
@@ -124,7 +124,7 @@ jobs:
     # Only upload wheels when tagging (typically a release)
     if: startsWith(github.event.ref, 'refs/tags')
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v6
         with:
           path: ./wheelhouse
           merge-multiple: true  # Merge all the wheels artifacts into one directory

@@ -12,7 +12,7 @@ import builtins
 import inspect
 import math
 import tempfile
-import warnings
+from abc import abstractmethod
 from collections import OrderedDict, namedtuple
 from functools import reduce
 from itertools import product
@@ -41,10 +41,17 @@ if NUMPY_GE_2_0:  # array-api compliant
     nplshift = np.bitwise_left_shift
     nprshift = np.bitwise_right_shift
     npbinvert = np.bitwise_invert
+    npvecdot = np.vecdot
+    nptranspose = np.permute_dims
 else:  # not array-api compliant
     nplshift = np.left_shift
     nprshift = np.right_shift
     npbinvert = np.bitwise_not
+    nptranspose = np.transpose
+
+    def npvecdot(a, b, axis=-1):
+        return np.einsum("...i,...i->...", np.moveaxis(np.conj(a), axis, -1), np.moveaxis(b, axis, -1))
+
 
 # These functions in ufunc_map in ufunc_map_1param are implemented in numexpr and so we call
 # those instead (since numexpr uses multithreading it is faster)
@@ -859,6 +866,60 @@ def any(
     Any in the flattened array: True
     """
     return ndarr.any(axis=axis, keepdims=keepdims, **kwargs)
+
+
+def argmin(
+    ndarr: blosc2.Array, axis: int | None = None, keepdims: bool = False, **kwargs
+) -> blosc2.Array | int:
+    """
+    Returns the indices of the minimum values along a specified axis.
+
+    When the minimum value occurs multiple times, only the indices corresponding to the first occurrence are returned.
+
+    Parameters
+    ----------
+    x: blosc2.Array
+        Input array. Should have a real-valued data type.
+
+    axis: int | None
+        Axis along which to search. If None, return index of the minimum value of flattened array. Default: None.
+
+    keepdims: bool
+        If True, reduced axis included in the result as singleton dimension. Otherwise, axis not included in the result. Default: False.
+
+    Returns
+    -------
+    out: blosc2.Array
+        If axis is None, a zero-dimensional array containing the index of the first occurrence of the minimum value; otherwise, a non-zero-dimensional array containing the indices of the minimum values.
+    """
+    return ndarr.argmin(axis=axis, keepdims=keepdims, **kwargs)
+
+
+def argmax(
+    ndarr: blosc2.Array, axis: int | None = None, keepdims: bool = False, **kwargs
+) -> blosc2.Array | int:
+    """
+    Returns the indices of the maximum values along a specified axis.
+
+    When the maximum value occurs multiple times, only the indices corresponding to the first occurrence are returned.
+
+    Parameters
+    ----------
+    x: blosc2.Array
+        Input array. Should have a real-valued data type.
+
+    axis: int | None
+        Axis along which to search. If None, return index of the maximum value of flattened array. Default: None.
+
+    keepdims: bool
+        If True, reduced axis included in the result as singleton dimension. Otherwise, axis not included in the result. Default: False.
+
+    Returns
+    -------
+    out: blosc2.Array
+        If axis is None, a zero-dimensional array containing the index of the first occurrence of the maximum value; otherwise, a non-zero-dimensional array containing the indices of the maximum values.
+    """
+    return ndarr.argmax(axis=axis, keepdims=keepdims, **kwargs)
 
 
 def all(
@@ -2932,6 +2993,7 @@ def clip(
     x: blosc2.Array,
     min: int | float | blosc2.Array | None = None,
     max: int | float | blosc2.Array | None = None,
+    **kwargs: Any,
 ) -> NDArray:
     """
     Clamps each element x_i of the input array x to the range [min, max].
@@ -2949,6 +3011,9 @@ def clip(
         Upper-bound of the range to which to clamp. If None, no upper bound must be applied.
         Default: None.
 
+    kwargs: Any
+        kwargs accepted by the :func:`empty` constructor
+
     Returns
     -------
     out: NDArray
@@ -2960,10 +3025,11 @@ def clip(
         x, min, max = inputs
         output[:] = np.clip(x, min, max)
 
-    return blosc2.lazyudf(chunkwise_clip, (x, min, max), dtype=x.dtype, shape=x.shape)
+    dtype = blosc2.result_type(x)
+    return blosc2.lazyudf(chunkwise_clip, (x, min, max), dtype=dtype, shape=x.shape, **kwargs)
 
 
-def logaddexp(x1: int | float | blosc2.Array, x2: int | float | blosc2.Array) -> NDArray:
+def logaddexp(x1: int | float | blosc2.Array, x2: int | float | blosc2.Array, **kwargs: Any) -> NDArray:
     """
     Calculates the logarithm of the sum of exponentiations log(exp(x1) + exp(x2)) for
     each element x1_i of the input array x1 with the respective element x2_i of the
@@ -2974,9 +3040,12 @@ def logaddexp(x1: int | float | blosc2.Array, x2: int | float | blosc2.Array) ->
     x1: blosc2.Array
         First input array. May have any real-valued floating-point data type.
 
-    x2:blosc2.Array
+    x2: blosc2.Array
         Second input array. Must be compatible with x1. May have any
         real-valued floating-point data type.
+
+    kwargs: Any
+        kwargs accepted by the :func:`empty` constructor
 
     Returns
     -------
@@ -2989,13 +3058,13 @@ def logaddexp(x1: int | float | blosc2.Array, x2: int | float | blosc2.Array) ->
         x1, x2 = inputs
         output[:] = np.logaddexp(x1, x2)
 
-    dtype = blosc2.result_type(x1.dtype, x2.dtype)
+    dtype = blosc2.result_type(x1, x2)
     if dtype == blosc2.bool_:
         raise TypeError("logaddexp doesn't accept boolean arguments.")
 
     if np.issubdtype(dtype, np.integer):
         dtype = blosc2.float32
-    return blosc2.lazyudf(chunkwise_logaddexp, (x1, x2), dtype=dtype, shape=x1.shape)
+    return blosc2.lazyudf(chunkwise_logaddexp, (x1, x2), dtype=dtype, shape=x1.shape, **kwargs)
 
 
 # implemented in python-blosc2
@@ -3026,6 +3095,58 @@ class Operand:
             "data": self[()],
             "version": 3,
         }
+
+    @property
+    @abstractmethod
+    def dtype(self) -> np.dtype:
+        """
+        Get the data type of the :ref:`Operand`.
+
+        Returns
+        -------
+        out: np.dtype
+            The data type of the :ref:`Operand`.
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def shape(self) -> tuple[int]:
+        """
+        Get the shape of the :ref:`Operand`.
+
+        Returns
+        -------
+        out: tuple
+                The shape of the :ref:`Operand`.
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def ndim(self) -> int:
+        """
+        Get the number of dimensions of the :ref:`Operand`.
+
+        Returns
+        -------
+        out: int
+            The number of dimensions of the :ref:`Operand`.
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def info(self) -> InfoReporter:
+        """
+        Get information about the :ref:`Operand`.
+
+        Returns
+        -------
+        out: InfoReporter
+            A printable class with information about the :ref:`Operand`.
+        """
+        pass
 
     @property
     def device(self):
@@ -3064,7 +3185,7 @@ class Operand:
         if ufunc in ufunc_map:
             value = inputs[0] if inputs[1] is self else inputs[1]
             _check_allowed_dtypes(value)
-            return blosc2.LazyExpr(new_op=(value, ufunc_map[ufunc], self))
+            return blosc2.LazyExpr(new_op=(inputs[0], ufunc_map[ufunc], inputs[1]))
 
         if ufunc in ufunc_map_1param:
             value = inputs[0]
@@ -3287,6 +3408,16 @@ class Operand:
     def max(self, axis=None, keepdims=False, **kwargs):
         expr = blosc2.LazyExpr(new_op=(self, None, None))
         return expr.max(axis=axis, keepdims=keepdims, **kwargs)
+
+    @is_documented_by(argmax)
+    def argmax(self, axis=None, keepdims=False, **kwargs):
+        expr = blosc2.LazyExpr(new_op=(self, None, None))
+        return expr.argmax(axis=axis, keepdims=keepdims, **kwargs)
+
+    @is_documented_by(argmin)
+    def argmin(self, axis=None, keepdims=False, **kwargs):
+        expr = blosc2.LazyExpr(new_op=(self, None, None))
+        return expr.argmin(axis=axis, keepdims=keepdims, **kwargs)
 
     @is_documented_by(any)
     def any(self, axis=None, keepdims=False, **kwargs):
@@ -3881,20 +4012,12 @@ class NDArray(blosc2_ext.NDArray, Operand):
         # Default when there are booleans
         # TODO: for boolean indexing could be optimised by avoiding
         # calculating out_shape prior to loop and keeping track on-the-fly (like in LazyExpr machinery)
-        return self._get_set_findex_default(_slice, out_shape)
+        out = np.empty(out_shape, dtype=self.dtype)
+        return self._get_set_findex_default(_slice, out)
 
-    def _get_set_findex_default(self, _slice, out_shape=None, updater=None):
-        _get = False
-        if not ((out_shape is None) or (updater is None)):
-            raise ValueError("Cannot provide both out_shape and updater.")
-        # we have a getitem
-        if out_shape is not None:
-            _get = True
-            out = np.empty(out_shape, dtype=self.dtype)
-        elif updater is None:
-            raise ValueError("Must provide one of out_shape or updater.")
-        else:
-            out = self  # default return for no intersecting chunks
+    def _get_set_findex_default(self, _slice, out=None, value=None):
+        _get = out is not None
+        out = self if out is None else out  # default return for setitem with no intersecting chunks
         if 0 in self.shape:
             return out
         chunk_size = ndindex.ChunkSize(self.chunks)  # only works with nonzero chunks
@@ -3909,10 +4032,10 @@ class NDArray(blosc2_ext.NDArray, Operand):
             chunk = np.empty(tuple(sp - st for st, sp in zip(start, stop, strict=True)), dtype=self.dtype)
             super().get_slice_numpy(chunk, (start, stop))
             if _get:
-                new_shape = sel_idx.newshape(out_shape)
+                new_shape = sel_idx.newshape(out.shape)
                 out[sel_idx.raw] = chunk[sub_idx].reshape(new_shape)
             else:
-                chunk[sub_idx] = updater(sel_idx.raw)
+                chunk[sub_idx] = value if np.isscalar(value) else value[sel_idx]
                 out = super().set_slice((start, stop), chunk)
         return out
 
@@ -3934,7 +4057,42 @@ class NDArray(blosc2_ext.NDArray, Operand):
         """
         return super().set_oindex_numpy(key, arr)
 
-    def __getitem__(  # noqa: C901
+    def _get_set_nonunit_steps(self, _slice, out=None, value=None):
+        start, stop, step, mask = _slice
+        _get = out is not None
+        out = self if out is None else out  # default return for setitem with no intersecting chunks
+        if 0 in self.shape:
+            return out
+
+        chunks = self.chunks
+        _slice = tuple(slice(s, st, stp) for s, st, stp in zip(start, stop, step, strict=True))
+        intersecting_chunks = [
+            slice_to_chunktuple(s, c) for s, c in zip(_slice, chunks, strict=True)
+        ]  # internally handles negative steps
+        for c in product(*intersecting_chunks):
+            sel_idx, glob_selection, sub_idx = _get_selection(c, _slice, chunks)
+            sel_idx = tuple(s for s, m in zip(sel_idx, mask, strict=True) if not m)
+            sub_idx = tuple(s if not m else s.start for s, m in zip(sub_idx, mask, strict=True))
+            locstart, locstop = _get_local_slice(
+                glob_selection,
+                (),
+                ((), ()),  # switches start and stop for negative steps
+            )
+            chunk = np.empty(
+                tuple(sp - st for st, sp in zip(locstart, locstop, strict=True)), dtype=self.dtype
+            )
+            # basically load whole chunk, except for slice part at beginning and end
+            super().get_slice_numpy(chunk, (locstart, locstop))  # copy relevant slice of chunk
+            if _get:
+                out[sel_idx] = chunk[sub_idx]  # update relevant parts of chunk
+            else:
+                chunk[sub_idx] = (
+                    value if np.isscalar(value) else value[sel_idx]
+                )  # update relevant parts of chunk
+                out = super().set_slice((locstart, locstop), chunk)  # load updated partial chunk into array
+        return out
+
+    def __getitem__(
         self,
         key: None
         | int
@@ -4016,7 +4174,8 @@ class NDArray(blosc2_ext.NDArray, Operand):
                 if key:
                     _slice = ndindex.ndindex(()).expand(self.shape)  # just get whole array
                     out_shape = _slice.newshape(self.shape)
-                    return np.expand_dims(self._get_set_findex_default(_slice, out_shape=out_shape), 0)
+                    out = np.empty(out_shape, dtype=self.dtype)
+                    return np.expand_dims(self._get_set_findex_default(_slice, out=out), 0)
                 else:  # do nothing
                     return np.empty((0,) + self.shape, dtype=self.dtype)
             elif (
@@ -4032,12 +4191,9 @@ class NDArray(blosc2_ext.NDArray, Operand):
             return self.get_fselection_numpy(key)  # fancy index default, can be quite slow
 
         start, stop, step, none_mask = get_ndarray_start_stop(self.ndim, key_, self.shape)
-        for i, s in enumerate(step):  # (start, stop, -1) => stop < start
-            if s < 0:
-                temp = start[i]
-                start[i] = stop[i] + 1  # don't want to include stop
-                stop[i] = temp + 1  # want to include start
-        shape = np.array([sp - st for st, sp in zip(start, stop, strict=True)])
+        shape = np.array(
+            [(sp - st - np.sign(stp)) // stp + 1 for st, sp, stp in zip(start, stop, step, strict=True)]
+        )
         if mask is not None:  # there are some dummy dims from ints
             # only get mask for not Nones in key to have nm_ same length as shape
             nm_ = [not m for m, n in zip(mask, none_mask, strict=True) if not n]
@@ -4046,12 +4202,11 @@ class NDArray(blosc2_ext.NDArray, Operand):
             shape = tuple(shape[nm_])
 
         # Create the array to store the result
-        arr = np.empty(shape, dtype=self.dtype)
-        nparr = super().get_slice_numpy(arr, (start, stop))
-        if step != (1,) * self.ndim:  # TODO: optimise to work like __setitem__ for non-unit steps
-            # have to make step refer to sliced dims (which will be less if ints present)
-            slice_ = tuple(slice(None, None, st) for st, m in zip(step, nm_, strict=True) if m)
-            nparr = nparr[slice_]
+        nparr = np.empty(shape, dtype=self.dtype)
+        if step != (1,) * self.ndim:
+            nparr = self._get_set_nonunit_steps((start, stop, step, [not i for i in nm_]), out=nparr)
+        else:
+            nparr = super().get_slice_numpy(nparr, (start, stop))
 
         if np.any(none_mask):
             nparr = np.expand_dims(nparr, axis=[i for i, n in enumerate(none_mask) if n])
@@ -4063,7 +4218,7 @@ class NDArray(blosc2_ext.NDArray, Operand):
 
         return nparr
 
-    def __setitem__(  # noqa : C901
+    def __setitem__(
         self,
         key: None | int | slice | Sequence[slice | int | np.bool_ | np.ndarray[int | np.bool_] | None],
         value: object,
@@ -4106,14 +4261,9 @@ class NDArray(blosc2_ext.NDArray, Operand):
         key_, mask = process_key(key, self.shape)  # internally handles key an integer
         if hasattr(value, "shape") and value.shape == ():
             value = value.item()
-
-        def updater(sel_idx):
-            return value[sel_idx]
-
-        if np.isscalar(value):  # overwrite updater function for simple cases (faster)
-
-            def updater(sel_idx):
-                return value
+        value = (
+            value if np.isscalar(value) else blosc2.as_simpleproxy(value)
+        )  # convert to SimpleProxy for e.g. JAX, Tensorflow, PyTorch
 
         if builtins.any(isinstance(k, (list, np.ndarray)) for k in key_):  # fancy indexing
             _slice = ndindex.ndindex(key_).expand(
@@ -4127,52 +4277,27 @@ class NDArray(blosc2_ext.NDArray, Operand):
                     _slice = ndindex.ndindex(()).expand(self.shape)  # just get whole array
                 else:  # do nothing
                     return self
-            return self._get_set_findex_default(_slice, updater=updater)
+            return self._get_set_findex_default(_slice, value=value)
 
         start, stop, step, none_mask = get_ndarray_start_stop(self.ndim, key_, self.shape)
 
         if step != (1,) * self.ndim:  # handle non-unit or negative steps
             if np.any(none_mask):
                 raise ValueError("Cannot mix non-unit steps and None indexing for __setitem__.")
-            chunks = self.chunks
-            shape = self.shape
-            _slice = tuple(slice(s, st, stp) for s, st, stp in zip(start, stop, step, strict=True))
-            intersecting_chunks = [
-                slice_to_chunktuple(s, c) for s, c in zip(_slice, chunks, strict=True)
-            ]  # internally handles negative steps
-            out = self  # for when shape has 0 (i.e. arr is empty, as then skip loop)
-            for c in product(*intersecting_chunks):
-                sel_idx, glob_selection, sub_idx = _get_selection(c, _slice, chunks)
-                sel_idx = tuple(s for s, m in zip(sel_idx, mask, strict=True) if not m)
-                sub_idx = tuple(s if not m else s.start for s, m in zip(sub_idx, mask, strict=True))
-                locstart, locstop = _get_local_slice(
-                    glob_selection,
-                    (),
-                    ((), ()),  # switches start and stop for negative steps
-                )
-                chunk = np.empty(
-                    tuple(sp - st for st, sp in zip(locstart, locstop, strict=True)), dtype=self.dtype
-                )
-                super().get_slice_numpy(chunk, (locstart, locstop))  # copy relevant slice of chunk
-                chunk[sub_idx] = updater(sel_idx)  # update relevant parts of chunk
-                out = super().set_slice((locstart, locstop), chunk)  # load updated partial chunk into array
-            return out
+            return self._get_set_nonunit_steps((start, stop, step, mask), value=value)
 
         shape = [sp - st for sp, st in zip(stop, start, strict=False)]
-        if isinstance(value, NDArray):
-            value = value[...]  # convert to numpy
-        if np.isscalar(value):
+        if isinstance(value, blosc2.Operand):  # handles SimpleProxy, NDArray, LazyExpr etc.
+            value = value[()]  # convert to numpy
+        if np.isscalar(value) or value.shape == ():
             value = np.full(shape, value, dtype=self.dtype)
-        elif isinstance(value, np.ndarray):  # handles decompressed NDArray too
-            if value.dtype != self.dtype:
-                try:
-                    value = value.astype(self.dtype)
-                except ComplexWarning:
-                    # numexpr type inference can lead to unnecessary type promotions
-                    # when using complex functions (e.g. conj) with real arrays
-                    value = value.real.astype(self.dtype)
-            if value.shape == ():
-                value = np.full(shape, value, dtype=self.dtype)
+        if value.dtype != self.dtype:  # handles decompressed NDArray too
+            try:
+                value = value.astype(self.dtype)
+            except ComplexWarning:
+                # numexpr type inference can lead to unnecessary type promotions
+                # when using complex functions (e.g. conj) with real arrays
+                value = value.real.astype(self.dtype)
 
         return super().set_slice((start, stop), value)
 
@@ -4556,8 +4681,7 @@ class NDArray(blosc2_ext.NDArray, Operand):
                 for order, nchunk in enumerate(aligned_chunks):
                     chunk = self.schunk.get_chunk(nchunk)
                     newarr.schunk.update_chunk(order, chunk)
-                newarr.squeeze(axis=np.where(mask)[0])  # remove any dummy dims introduced
-                return newarr
+                return newarr.squeeze(axis=np.where(mask)[0])  # remove any dummy dims introduced
 
         key = (start, stop)
         ndslice = super().get_slice(key, mask, **kwargs)
@@ -4575,7 +4699,7 @@ class NDArray(blosc2_ext.NDArray, Operand):
 
         return ndslice
 
-    def squeeze(self, axis=None) -> NDArray:
+    def squeeze(self, axis: int | Sequence[int]) -> NDArray:
         """Remove single-dimensional entries from the shape of the array.
 
         This method modifies the array in-place. If mask is None removes any dimensions with size 1.
@@ -4599,19 +4723,7 @@ class NDArray(blosc2_ext.NDArray, Operand):
         >>> a.shape
         (23, 11)
         """
-        if axis is None:
-            super().squeeze()
-        else:
-            axis = [axis] if isinstance(axis, int) else axis
-            mask = [False for i in range(self.ndim)]
-            for a in axis:
-                if a < 0:
-                    a += self.ndim  # Adjust axis to be within the array's dimensions
-                if mask[a]:
-                    raise ValueError("Axis values must be unique.")
-                mask[a] = True
-            super().squeeze(mask=mask)
-        return self
+        return blosc2.squeeze(self, axis=axis)
 
     def indices(self, order: str | list[str] | None = None, **kwargs: Any) -> NDArray:
         """
@@ -4644,17 +4756,23 @@ class NDArray(blosc2_ext.NDArray, Operand):
         return blosc2.linalg.matmul(self, other)
 
 
-def squeeze(x: NDArray, axis: int | None = None) -> NDArray:
+def squeeze(x: Array, axis: int | Sequence[int]) -> NDArray:
     """
     Remove single-dimensional entries from the shape of the array.
 
-    This method modifies the array in-place. If mask is None removes any dimensions with size 1.
-    If axis is provided, it should be an int or tuple of ints and the corresponding
-    dimensions (of size 1) will be removed.
+    This method modifies the array in-place.
+
+    Parameters
+    ----------
+    x: Array
+        input array.
+    axis: int | Sequence[int]
+        Axis (or axes) to squeeze.
 
     Returns
     -------
-    out: NDArray
+    out: Array
+        An output array having the same data type and elements as x.
 
     Examples
     --------
@@ -4669,8 +4787,15 @@ def squeeze(x: NDArray, axis: int | None = None) -> NDArray:
     >>> b.shape
     (23, 11)
     """
-    # TODO: implement squeeze as a view
-    return x.squeeze(axis)
+    axis = [axis] if isinstance(axis, int) else axis
+    mask = [False for i in range(x.ndim)]
+    for a in axis:
+        if a < 0:
+            a += x.ndim  # Adjust axis to be within the array's dimensions
+        if mask[a]:
+            raise ValueError("Axis values must be unique.")
+        mask[a] = True
+    return blosc2_ext.squeeze(x, axis_mask=mask)
 
 
 def array_from_ffi_ptr(array_ptr) -> NDArray:
@@ -5446,20 +5571,6 @@ def concat(arrays: list[NDArray], /, axis=0, **kwargs: Any) -> NDArray:
     return arr1
 
 
-# Previous concatenate function was renamed to concat.  Keep it with a DeprecationWarning
-def concatenate(arrays: list[NDArray], /, axis=0, **kwargs: Any) -> NDArray:
-    """Concatenate a list of arrays along a specified axis.
-
-    This is an alias for :func:`concat`.  It is kept for backward compatibility.
-    """
-    warnings.warn(
-        "blosc2.concatenate is deprecated, use blosc2.concat instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return concat(arrays, axis, **kwargs)
-
-
 def expand_dims(array: NDArray, axis=0) -> NDArray:
     """
     Expand the shape of an array by adding new axes at the specified positions.
@@ -5603,7 +5714,8 @@ def asarray(array: Sequence | blosc2.Array, copy: bool | None = None, **kwargs: 
         raise ValueError("Only unsafe casting is supported at the moment.")
     if not hasattr(array, "shape"):
         array = np.asarray(array)  # defaults if dtype=None
-    dtype = kwargs.pop("dtype", array.dtype)  # check if dtype provided
+    dtype_ = blosc2.proxy._convert_dtype(array.dtype)
+    dtype = kwargs.pop("dtype", dtype_)  # check if dtype provided
     kwargs = _check_ndarray_kwargs(**kwargs)
     chunks = kwargs.pop("chunks", None)
     blocks = kwargs.pop("blocks", None)
@@ -5614,14 +5726,14 @@ def asarray(array: Sequence | blosc2.Array, copy: bool | None = None, **kwargs: 
     # Let's avoid this
     if blocks is None and hasattr(array, "blocks") and isinstance(array.blocks, (tuple, list)):
         blocks = array.blocks
-    chunks, blocks = compute_chunks_blocks(array.shape, chunks, blocks, array.dtype, **kwargs)
 
     copy = True if copy is None and not isinstance(array, NDArray) else copy
     if copy:
+        chunks, blocks = compute_chunks_blocks(array.shape, chunks, blocks, dtype_, **kwargs)
         # Fast path for small arrays. This is not too expensive in terms of memory consumption.
         shape = array.shape
         small_size = 2**24  # 16 MB
-        array_nbytes = math.prod(shape) * array.dtype.itemsize
+        array_nbytes = math.prod(shape) * dtype_.itemsize
         if array_nbytes < small_size:
             if not isinstance(array, np.ndarray) and hasattr(array, "chunks"):
                 # A getitem operation should be enough to get a numpy array
@@ -5632,7 +5744,7 @@ def asarray(array: Sequence | blosc2.Array, copy: bool | None = None, **kwargs: 
             return blosc2_ext.asarray(array, chunks, blocks, **kwargs)
 
         # Create the empty array
-        ndarr = empty(shape, array.dtype, chunks=chunks, blocks=blocks, **kwargs)
+        ndarr = empty(shape, dtype_, chunks=chunks, blocks=blocks, **kwargs)
         behaved = are_partitions_behaved(shape, chunks, blocks)
 
         # Get the coordinates of the chunks
@@ -5890,7 +6002,7 @@ class NDField(Operand):
         self.chunks = ndarr.chunks
         self.blocks = ndarr.blocks
         self.field = field
-        self.dtype = ndarr.dtype.fields[field][0]
+        self._dtype = ndarr.dtype.fields[field][0]
         self.offset = ndarr.dtype.fields[field][1]
 
     def __repr__(self):
@@ -5907,6 +6019,11 @@ class NDField(Operand):
     def shape(self) -> tuple[int]:
         """The shape of the associated :ref:`NDArray`."""
         return self.ndarr.shape
+
+    @property
+    def dtype(self) -> np.dtype:
+        """The dtype of the field of associated :ref:`NDArray`."""
+        return self._dtype
 
     @property
     def schunk(self) -> blosc2.SChunk:
@@ -6202,6 +6319,18 @@ def take_along_axis(x: blosc2.Array, indices: blosc2.Array, axis: int = -1) -> N
     return blosc2.asarray(x[key])
 
 
+class MyChunkRange:
+    def __init__(self, start, stop, step=1, n=1):
+        self.start = start
+        self.stop = stop
+        self.step = step
+        self.n = n
+
+    def __iter__(self):
+        for k in range(math.ceil((self.stop - self.start) / self.step)):
+            yield (self.start + k * self.step) // self.n
+
+
 def slice_to_chunktuple(s, n):
     # Adapted from _slice_iter in ndindex.ChunkSize.as_subchunks.
     start, stop, step = s.start, s.stop, s.step
@@ -6211,7 +6340,7 @@ def slice_to_chunktuple(s, n):
         start = temp + 1
         step = -step  # get positive steps
     if step > n:
-        return ((start + k * step) // n for k in range(ceiling(stop - start, step)))
+        return MyChunkRange(start, stop, step, n)
     else:
         return range(start // n, ceiling(stop, n))
 
@@ -6258,7 +6387,7 @@ def _get_selection(ctuple, ptuple, chunks):
     out_pselection = ()
     i = 0
     for ps, pt in zip(pselection, ptuple, strict=True):
-        sign_ = pt.step // builtins.abs(pt.step)
+        sign_ = np.sign(pt.step)
         n = (ps.start - pt.start - sign_) // pt.step
         out_start = n + 1
         # ps.stop always positive except for case where get full array (it is then -1 since desire 0th element)

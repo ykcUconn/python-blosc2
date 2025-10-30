@@ -1,12 +1,14 @@
-Announcing Python-Blosc2 3.9.1
-==============================
+Announcing Python-Blosc2 3.11.0
+===============================
 
-This is a patch release where we have aimed to tidy up the code and improve robustness:
+This is a minor version release where we have aimed to tidy up the code and add some useful functionality:
 
-✅ Bumped to numexpr 2.13.1 to incorporate new maximum/minimum NaN handling and "+"/"*" for booleans
-which matches NumPy behaviour.
-✅ Refactoring in order to ensure Blosc2 functions with NumPy 1.26.
-✅ Streamlined documentation by introducing Array Protocol
+✅ Small optimisation for chunking in lazy expressions
+✅ Extend Blosc2 to accept general array inputs (PR #510, PR #517)
+✅ Refactoring and streamlining of get/setitem for non-unit steps (PR #513)
+✅ Remote array testing now performed with ``cat2cloud`` (PR #511)
+✅ Added argmax/argmin functions (PR #514)
+✅ Change ``squeeze`` to return view (rather than modify array in-place) (PR #518)
 
 You can think of Python-Blosc2 3.x as an extension of NumPy/numexpr that:
 

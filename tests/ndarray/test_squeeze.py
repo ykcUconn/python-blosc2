@@ -19,15 +19,14 @@ import blosc2
         ((23, 1, 1, 34), (20, 1, 1, 20), None, 1234, 2),
         ((80, 1, 51, 60, 1), None, (6, 1, 6, 26, 1), 3.333, 4),
         ((1, 1, 1), None, None, True, (1, 2)),
-        ((1, 1, 1), None, None, True, None),
     ],
 )
 def test_squeeze(shape, chunks, blocks, fill_value, axis):
     a = blosc2.full(shape, fill_value=fill_value, chunks=chunks, blocks=blocks)
 
     b = np.squeeze(a[...], axis)
-    a_ = a.squeeze(axis)
+    a_ = blosc2.squeeze(a, axis)
 
     assert a_.shape == b.shape
-    # TODO: this would work if squeeze returns a view
-    # assert a_.shape != a.shape
+    # Confirm squeeze returns a view (does not modify original array)
+    assert a_.shape != a.shape

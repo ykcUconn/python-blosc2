@@ -39,7 +39,8 @@ Preliminaries
 
 * Double check that the supported Python versions for the wheels are the correct ones
   (``.github/workflows/cibuildwheels.yml``).  Add/remove Python version if needed.
-  Also, update the ``classifiers`` field for the supported Python versions.
+  Also, update the ``classifiers`` field in pyproject.toml for the supported Python
+  versions.
 
 * Check that the metainfo for the package is correct::
 
@@ -112,8 +113,8 @@ Checking packaging
 
 The wheels may be downloaded by going to "Actions->Python wheels for WASM"
 and selecting the completed workflow run for the version you are releasing.
-Then, go to the "Artifacts" dropdown and download the WASM wheel file.
-
+Then, go to the "Artifacts" dropdown and download the WASM wheel file(s).
+**Note**: be sure to upload the wheel files, not the zip file containing them.
 
 Announcing
 ----------

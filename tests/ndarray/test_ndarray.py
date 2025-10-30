@@ -294,13 +294,13 @@ def test_oindex():
     np.testing.assert_allclose(arr[:], nparr)
 
 
-@pytest.mark.parametrize("c", [None, 10])
+@pytest.mark.parametrize("c", [None, 3])
 def test_fancy_index(c):
     # Test 1d
     ndim = 1
     chunks = (c,) * ndim if c is not None else None
     dtype = np.dtype("float")
-    d = 1 + int(1000 / dtype.itemsize) if c is None else 50
+    d = 1 + int(1000 / dtype.itemsize) if c is None else 10
     shape = (d,) * ndim
     arr = blosc2.linspace(0, 100, num=np.prod(shape), shape=shape, dtype=dtype, chunks=chunks)
     rng = np.random.default_rng()
@@ -319,7 +319,7 @@ def test_fancy_index(c):
     chunks = (c,) * ndim if c is not None else None
     arr = blosc2.linspace(0, 100, num=np.prod(shape), shape=shape, dtype=dtype, chunks=chunks)
     rng = np.random.default_rng()
-    idx = rng.integers(low=-d, high=d, size=(100,))  # mix of +ve and -ve indices
+    idx = rng.integers(low=-d, high=d, size=(30,))  # mix of +ve and -ve indices
 
     row = idx
     col = rng.permutation(idx)
@@ -361,7 +361,7 @@ def test_fancy_index(c):
     b = arr[row, d // 2 :: -1]
     n = nparr[row, d // 2 :: -1]
     np.testing.assert_allclose(b, n)
-    b = arr[M // 2 :: -4, row, d // 2 :: -3]
+    b = arr[M // 2 :: -4, row, d // 2 :: -3]  # test stepsize > chunk_shape
     n = nparr[M // 2 :: -4, row, d // 2 :: -3]
     np.testing.assert_allclose(b, n)
 

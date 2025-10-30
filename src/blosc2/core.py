@@ -920,6 +920,13 @@ def set_nthreads(nthreads: int) -> int:
 
     Notes
     -----
+    The number of threads can also be set via the ``BLOSC_NTHREADS`` environment
+    variable (e.g., ``export BLOSC_NTHREADS=1``). Additionally, you may want to set
+    ``NUMEXPR_NUM_THREADS`` (e.g., ``export NUMEXPR_NUM_THREADS=1``) as well since
+    numexpr is used under the hood when performing some operations.  Note that
+    this function only sets the number of threads used by Blosc, not the number
+    of threads used by numexpr.
+
     The maximum number of threads for Blosc is :math:`2^{31} - 1`. In some
     cases, Blosc gets better results if you set the number of threads
     to a value slightly below your number of cores
@@ -1166,7 +1173,10 @@ def get_cache_info(cache_level: int) -> tuple:
     if cache_level == 0:
         cache_level = "1d"
 
-    result = subprocess.run(["lscpu", "--json"], capture_output=True, check=True, text=True)
+    try:
+        result = subprocess.run(["lscpu", "--json"], capture_output=True, check=True, text=True)
+    except (FileNotFoundError, subprocess.CalledProcessError) as err:
+        raise ValueError("lscpu not found or error running lscpu") from err
     lscpu_info = json.loads(result.stdout)
     for entry in lscpu_info["lscpu"]:
         if entry["field"] == f"L{cache_level} cache:":
